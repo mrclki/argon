@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package compute;
+
+option go_package = "github.com/peertechde/argon/api";
+
+service Storage {
+  rpc Upload(stream UploadRequest) returns (UploadResponse);
+  rpc Download(DownloadRequest) returns (stream DownloadResponse);
+}
+
+message UploadRequest {
+  oneof member {
+    string name = 1;
+    bytes data = 2;
+  }
+}
+
+message UploadResponse {}
+
+message DownloadRequest {
+  string name = 1;
+}
+
+message DownloadResponse {
+  bytes data = 1;
+}
