@@ -17,8 +17,12 @@ func main() {
 	app.Usage = ""
 	app.Flags = []cli.Flag{}
 	app.Commands = []*cli.Command{
-		UploadCommand(),
-		DownloadCommand(),
+		WriteCommand(),
+		ReadCommand(),
+		ListCommand(),
+		StatCommand(),
+		RemoveCommand(),
+		RenameCommand(),
 		ServerCommand(),
 	}
 

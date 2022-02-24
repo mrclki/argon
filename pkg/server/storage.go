@@ -2,35 +2,67 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/peertechde/argon/api"
+	"github.com/peertechde/argon/pkg/storage"
 )
 
-func NewStorageService(root string) *StorageService {
+func NewStorageService(store storage.Storage) *StorageService {
 	return &StorageService{
-		root: root,
+		store: store,
 	}
 }
 
 type StorageService struct {
 	api.UnimplementedStorageServer
 
-	root string
+	store storage.Storage
 }
 
-func (s *StorageService) path(name string) string {
-	return filepath.Join(s.root, name)
+func (s *StorageService) Read(req *api.ReadRequest, stream api.Storage_ReadServer) error {
+	scopedLog := log.WithFields(logrus.Fields{
+		"name": req.Name,
+	})
+	scopedLog.Info("Handling read request")
+
+	data, err := s.store.Read(stream.Context(), req.Name)
+	if err != nil {
+		if errors.Is(err, &storage.NotFoundError{Name: req.Name}) {
+			return status.Errorf(codes.AlreadyExists, "file (%s) does not exist", req.Name)
+		}
+		return status.Errorf(codes.Internal, "failed to read file")
+	}
+
+	rd := bytes.NewReader(data)
+	buf := make([]byte, defaultMaxMsgSize-1024)
+	for {
+		n, err := rd.Read(buf)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return status.Errorf(codes.Internal, "failed to read file")
+		}
+		if err := stream.Send(&api.ReadResponse{Data: buf[:n]}); err != nil {
+			return status.Errorf(codes.Internal, "failed to send data")
+		}
+		scopedLog.Debugf("Send %d bytes of data", n)
+	}
+
+	scopedLog.Info("Successfully handled read request")
+
+	return nil
 }
 
-func (s *StorageService) Upload(stream api.Storage_UploadServer) error {
+func (s *StorageService) Write(stream api.Storage_WriteServer) error {
 	req, err := stream.Recv()
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid argument")
@@ -40,11 +72,10 @@ func (s *StorageService) Upload(stream api.Storage_UploadServer) error {
 	scopedLog := log.WithFields(logrus.Fields{
 		"name": name,
 	})
-	scopedLog.Info("Received upload request")
+	scopedLog.Info("Handling write request")
 
-	if _, err := os.Stat(s.path(name)); err == nil {
-		scopedLog.Info("File already exists")
-		return status.Errorf(codes.AlreadyExists, "file (%s) already exists", name)
+	if _, err := s.store.Stat(stream.Context(), name); err == nil {
+		return status.Errorf(codes.AlreadyExists, "file %s already exists")
 	}
 
 	var buf bytes.Buffer
@@ -68,69 +99,94 @@ func (s *StorageService) Upload(stream api.Storage_UploadServer) error {
 		size += len(req.GetData())
 	}
 
-	n, err := s.save(name, buf.Bytes())
-	if err != nil {
-		return status.Errorf(codes.Internal, "failed to save file")
+	if err := s.store.Write(stream.Context(), name, buf.Bytes()); err != nil {
+		scopedLog.Errorf("Failed to write file (%s)", err)
+		return status.Errorf(codes.Internal, "failed to write file")
 	}
 
-	// TODO: check for "short writes"
-	if n != size {
-	}
-
-	if err := stream.SendAndClose(&api.UploadResponse{}); err != nil {
+	if err := stream.SendAndClose(&api.WriteResponse{}); err != nil {
 		log.Errorf("Failed to close the connection (%s)", err)
 		return err
 	}
 
+	scopedLog.Info("Successfully handled write request")
 	return nil
 }
 
-func (s *StorageService) Download(req *api.DownloadRequest, stream api.Storage_DownloadServer) error {
+func (s *StorageService) List(ctx context.Context, req *api.ListRequest) (*api.ListResponse, error) {
+	log.Info("Handling list request")
+
+	files, err := s.store.List(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list files")
+	}
+
+	log.Info("Successfully handled list request")
+	return &api.ListResponse{Files: files}, nil
+}
+
+func (s *StorageService) Stat(ctx context.Context, req *api.StatRequest) (*api.StatResponse, error) {
 	scopedLog := log.WithFields(logrus.Fields{
 		"name": req.Name,
 	})
-	scopedLog.Info("Received download request")
+	scopedLog.Info("Handling stat request")
 
-	if _, err := os.Stat(s.path(req.Name)); errors.Is(err, os.ErrNotExist) {
-		return status.Errorf(codes.AlreadyExists, "file (%s) doesn't exists", req.Name)
+	if req.Name == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid file name")
 	}
 
-	fd, err := os.Open(s.path(req.Name))
+	fi, err := s.store.Stat(ctx, req.Name)
 	if err != nil {
-		return status.Errorf(codes.Internal, "failed to open file")
+		return nil, status.Errorf(codes.Internal, "failed to stat file %s", req.Name)
 	}
-	defer fd.Close()
-
-	buf := make([]byte, defaultMaxMsgSize-1024)
-	for {
-		n, err := fd.Read(buf)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return status.Errorf(codes.Internal, "failed to read file")
-		}
-		if err := stream.Send(&api.DownloadResponse{Data: buf}); err != nil {
-			return status.Errorf(codes.Internal, "failed to send data")
-		}
-		scopedLog.Debugf("Send %d bytes of data", n)
+	fileInfo := &api.FileInfo{
+		Name:    fi.Name,
+		Size:    fi.Size,
+		Mode:    fi.Mode,
+		ModTime: timestamppb.New(fi.ModTime),
+		Dir:     fi.Dir,
 	}
 
-	scopedLog.Info("Successfully handled download request")
-
-	return nil
+	scopedLog.Info("Successfully handled stat request")
+	return &api.StatResponse{FileInfo: fileInfo}, nil
 }
 
-func (s *StorageService) save(name string, data []byte) (int, error) {
-	fd, err := os.Create(s.path(name))
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to create file")
-	}
-	defer fd.Close()
+func (s *StorageService) Remove(ctx context.Context, req *api.RemoveRequest) (*api.RemoveResponse, error) {
+	scopedLog := log.WithFields(logrus.Fields{
+		"name": req.Name,
+	})
+	scopedLog.Info("Handling remove request")
 
-	n, err := fd.Write(data)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to write file")
+	if req.Name == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid file name")
 	}
-	return n, nil
+
+	if err := s.store.Remove(ctx, req.Name); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to remove file %s", req.Name)
+	}
+
+	scopedLog.Info("Successfully handled remove request")
+	return &api.RemoveResponse{}, nil
+}
+
+func (s *StorageService) Rename(ctx context.Context, req *api.RenameRequest) (*api.RenameResponse, error) {
+	scopedLog := log.WithFields(logrus.Fields{
+		"old": req.Old,
+		"new": req.New,
+	})
+	scopedLog.Info("Handling rename request")
+
+	if req.Old == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid old file name")
+	}
+	if req.New == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid new file name")
+	}
+
+	if err := s.store.Rename(ctx, req.Old, req.New); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to rename file %s to %s", req.Old, req.New)
+	}
+
+	scopedLog.Info("Successfully handled rename request")
+	return &api.RenameResponse{}, nil
 }

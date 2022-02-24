@@ -14,6 +14,8 @@ import (
 
 	"github.com/peertechde/argon/api"
 	"github.com/peertechde/argon/pkg/logging"
+	"github.com/peertechde/argon/pkg/storage"
+	"github.com/peertechde/argon/pkg/storage/local"
 )
 
 var log = logging.Logger.WithField(logging.Subsys, "server")
@@ -49,6 +51,7 @@ type Server struct {
 
 	grpcServer     *grpc.Server
 	storageService *StorageService
+	store          storage.Storage
 }
 
 func (s *Server) Serve() error {
@@ -60,7 +63,7 @@ func (s *Server) Serve() error {
 	}).Info("Starting the server")
 
 	s.registerMetrics()
-	s.storageService = NewStorageService(s.options.StoragePath)
+	s.storageService = NewStorageService(local.New(s.options.StoragePath))
 
 	addr := fmt.Sprintf("%s:%d", s.options.Addr, s.options.Port)
 	ln, err := net.Listen("tcp", addr)

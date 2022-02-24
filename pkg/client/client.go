@@ -15,6 +15,7 @@ import (
 
 	"github.com/peertechde/argon/api"
 	"github.com/peertechde/argon/pkg/logging"
+	"github.com/peertechde/argon/pkg/storage"
 )
 
 const (
@@ -60,53 +61,8 @@ func (c *Client) DialContext(ctx context.Context, target string) error {
 	return nil
 }
 
-func (c *Client) Upload(ctx context.Context, path string) error {
-	fd, err := os.Open(path)
-	if err != nil {
-		return errors.Wrapf(err, "failed to open file")
-	}
-	defer fd.Close()
-
-	stream, err := c.storageClient.Upload(ctx)
-	if err != nil {
-		return err
-	}
-
-	if err := stream.Send(&api.UploadRequest{Member: &api.UploadRequest_Name{Name: filepath.Base(path)}}); err != nil {
-		s := status.Convert(err)
-		for _, d := range s.Details() {
-			switch info := d.(type) {
-			default:
-				log.Printf("Unexpected type: %s", info)
-			}
-		}
-		return errors.Wrap(err, "failed to send")
-	}
-
-	rd := bufio.NewReader(fd)
-	buf := make([]byte, defaultMaxMsgSize)
-	for {
-		n, err := rd.Read(buf)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return errors.Wrap(err, "failed to read file")
-		}
-		if err := stream.Send(&api.UploadRequest{Member: &api.UploadRequest_Data{Data: buf[:n]}}); err != nil {
-			return errors.Wrap(err, "failed to send")
-		}
-	}
-
-	if _, err := stream.CloseAndRecv(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Client) Download(ctx context.Context, name, dst string) error {
-	stream, err := c.storageClient.Download(ctx, &api.DownloadRequest{Name: name})
+func (c *Client) Read(ctx context.Context, name, dst string) error {
+	stream, err := c.storageClient.Read(ctx, &api.ReadRequest{Name: name})
 	if err != nil {
 		return err
 	}
@@ -136,6 +92,90 @@ func (c *Client) Download(ctx context.Context, name, dst string) error {
 	if n != size {
 	}
 
+	return nil
+}
+
+func (c *Client) Write(ctx context.Context, name string) error {
+	fd, err := os.Open(name)
+	if err != nil {
+		return errors.Wrapf(err, "failed to open file")
+	}
+	defer fd.Close()
+
+	stream, err := c.storageClient.Write(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := stream.Send(&api.WriteRequest{Member: &api.WriteRequest_Name{Name: filepath.Base(name)}}); err != nil {
+		s := status.Convert(err)
+		for _, d := range s.Details() {
+			switch info := d.(type) {
+			default:
+				log.Printf("Unexpected type: %s", info)
+			}
+		}
+		return errors.Wrap(err, "failed to send")
+	}
+
+	rd := bufio.NewReader(fd)
+	buf := make([]byte, defaultMaxMsgSize)
+	for {
+		n, err := rd.Read(buf)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return errors.Wrap(err, "failed to read file")
+		}
+		if err := stream.Send(&api.WriteRequest{Member: &api.WriteRequest_Data{Data: buf[:n]}}); err != nil {
+			return errors.Wrap(err, "failed to send")
+		}
+	}
+
+	if _, err := stream.CloseAndRecv(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) List(ctx context.Context) ([]string, error) {
+	resp, err := c.storageClient.List(ctx, &api.ListRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Files, nil
+}
+
+func (c *Client) Stat(ctx context.Context, name string) (*storage.FileInfo, error) {
+	resp, err := c.storageClient.Stat(ctx, &api.StatRequest{Name: name})
+	if err != nil {
+		return nil, err
+	}
+	fileInfo := &storage.FileInfo{
+		Name:    resp.FileInfo.Name,
+		Size:    resp.FileInfo.Size,
+		Mode:    resp.FileInfo.Mode,
+		ModTime: resp.FileInfo.ModTime.AsTime(),
+		Dir:     resp.FileInfo.Dir,
+	}
+	return fileInfo, nil
+}
+
+func (c *Client) Remove(ctx context.Context, name string) error {
+	_, err := c.storageClient.Remove(ctx, &api.RemoveRequest{Name: name})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) Rename(ctx context.Context, old, new string) error {
+	_, err := c.storageClient.Rename(ctx, &api.RenameRequest{Old: old, New: new})
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
