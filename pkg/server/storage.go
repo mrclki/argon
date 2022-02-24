@@ -36,7 +36,7 @@ func (s *StorageService) Read(req *api.ReadRequest, stream api.Storage_ReadServe
 	data, err := s.store.Read(stream.Context(), req.Name)
 	if err != nil {
 		if errors.Is(err, &storage.NotFoundError{Name: req.Name}) {
-			return status.Errorf(codes.AlreadyExists, "file (%s) does not exist", req.Name)
+			return status.Errorf(codes.InvalidArgument, "file (%s) does not exist", req.Name)
 		}
 		return status.Errorf(codes.Internal, "failed to read file")
 	}
